@@ -8,8 +8,10 @@
   "license": "MIT",
   "scripts": {
     "postversion": "git push && npm publish && git push --tags",
-    "lint": "eslint .",
+    "lint": "eslint *.js",
+    "pretest": "docker-compose -f __tests__/docker-compose.yml up -d",
     "test": "npm run lint && NODE_ENV=test npm run test:integration && npm run test:smoke",
+    "posttest": "docker-compose -f __tests__/docker-compose.yml down -v",
     "test:integration": "jest",
     "test:smoke": "./scripts/smoke-tests.sh"
   },

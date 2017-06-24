@@ -34,5 +34,8 @@
   "dependencies": {
     "lodash.defaults": "^4.2.0",
     "opentracing": "^0.14.1"
+  },
+  "engines": {
+    "node": ">= 6"
   }
 }

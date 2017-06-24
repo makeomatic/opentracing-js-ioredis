@@ -8,7 +8,9 @@ Implements opentracing Redis instrumentation for `ioredis` node.js client librar
 
 ## Usage
 
-#### applyInstrumentation(tracer: opentracer.Tracer, redis: Redis, [opts = {}])
+```js
+applyInstrumentation(tracer: opentracer.Tracer, redis: Redis, [opts = {}])
+```
 
 Applies instrumentation to Redis client instance, adding methods for seamlessly tracking calls to database
 
@@ -55,7 +57,9 @@ applyInstrumentation(tracer, redis, opts);
 Invokes `commandName` and passes `args` to it, creating a span with `commandName` and finishing it automatically
 Parent context is passed via `context` arg and can be omitted. Make sure you call `.finish()` whenever it's time to
 
-#### applyInstrumentation.traceStatements(enabled: boolean)
+```js
+applyInstrumentation.traceStatements(enabled: boolean)
+```
 
 May be useful for debugging purposes, enables setting tag of `opentracing.Tag.DB_STATEMENT` to serialized redis command.
 This is a serious performance hit and is disabled by default as we call `command.toWritable` twice in that case

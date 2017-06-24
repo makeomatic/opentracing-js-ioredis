@@ -2,13 +2,31 @@ const opentracing = require('opentracing');
 const assert = require('assert');
 const defaults = require('lodash.defaults');
 const Redis = require('ioredis');
+const Script = require('ioredis/lib/script');
 
 // Hold original reference so that we an redefine it later
 const originalInitPromise = Redis.Command.prototype.initPromise;
+const originalScriptExecute = Script.prototype.execute;
 
 // nulify reference
 let currentSpan = null;
 let traceStatements = false;
+
+/**
+ * Wraps promise with span error and finish handlers
+ * @param  {opentracing.Span} span - Opentracing Span instance.
+ * @param  {Promise} promise - Promise instance.
+ * @returns {Promise} - Wrapped Promise.
+ */
+const wrapPromise = (span, promise) => (
+  promise.tapCatch((err) => {
+    span.setTag(opentracing.Tags.ERROR, true);
+    span.log({ event: 'error', 'error.object': err, message: err.message, stack: err.stack });
+  })
+  .finally(() => {
+    span.finish();
+  })
+);
 
 /**
  * Restricted commands, we don't patch into them.
@@ -28,6 +46,7 @@ const restrictedCommands = Object.create(null, [
   'cluster',
   'swapdb',
   'monitor',
+  'pipeline',
 ].reduce((map, command) => {
   map[command] = { value: true };
   return map;
@@ -58,14 +77,25 @@ Redis.Command.prototype.initPromise = function initPromise() {
   }
 
   // rewire this.promise reference to instrumented one
-  this.promise = this.promise
-    .tapCatch((error) => {
-      span.setTag(opentracing.Tags.ERROR, true);
-      span.log({ event: 'error', 'error.object': error, message: error.message, stack: error.stack });
-    })
-    .finally(() => {
-      span.finish();
-    })
+  this.promise = wrapPromise(span, this.promise)
+    .asCallback(callback);
+};
+
+// monkey-patch execute
+Script.prototype.execute = function execute(container, args, options, callback) {
+  if (currentSpan === null) {
+    return originalScriptExecute.call(this, container, args, options, callback);
+  }
+
+  // grab reference now so that it's not overwritten by new Command in the original script
+  const span = currentSpan;
+  currentSpan = null;
+
+  // do original execute
+  const result = originalScriptExecute.call(this, container, args, options);
+
+  // must be promise as this can't be called from pipeline
+  return wrapPromise(span, result)
     .asCallback(callback);
 };
 
@@ -126,6 +156,19 @@ module.exports = function applyInstrumentation(tracer, redis, _opts) {
         childOf: parentContext,
         tags: opts.tags,
       });
+    } else if (commandName === 'pipeline') {
+      const span = tracer.startSpan(commandName, {
+        childOf: parentContext,
+        tags: opts.tags,
+      });
+
+      // init pipeline
+      const pipeline = redis[commandName](...args);
+
+      // rewire initialized promise on that pipeline
+      pipeline.promise = wrapPromise(span, pipeline.promise);
+
+      return pipeline;
     }
 
     return redis[commandName](...args);

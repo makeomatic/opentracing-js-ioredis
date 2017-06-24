@@ -1,4 +1,5 @@
 /* eslint-disable promise/always-return */
+const Promise = require('bluebird');
 const Redis = require('ioredis');
 const MockTracer = require('opentracing/lib/mock_tracer').MockTracer;
 const assert = require('assert');
@@ -60,6 +61,9 @@ describe('instrumentRedis', () => {
         assert.equal(response, 'OK');
 
         const report = tracer.report();
+
+        assert.ifError(report.firstSpanWithTagValue('error', true));
+
         assert.equal(report.spans.length, 1);
         assert.equal(report.unfinishedSpans.length, 0);
         assert.equal(printReport(report), [
@@ -77,6 +81,9 @@ describe('instrumentRedis', () => {
           context.finish();
 
           const report = tracer.report();
+
+          assert.ifError(report.firstSpanWithTagValue('error', true));
+
           assert.equal(report.spans.length, 2);
           assert.equal(report.unfinishedSpans.length, 0);
           assert.equal(printReport(report), [
@@ -108,10 +115,93 @@ describe('instrumentRedis', () => {
         assert.equal(report.spans.length, 2);
         assert.equal(report.unfinishedSpans.length, 1);
 
+        assert.ifError(report.firstSpanWithTagValue('error', true));
+
         assert.equal(printReport(report), [
           'Spans:',
           `    parent - ${report.spans[0].durationMs()}ms`, // <--- unfinished, still printed
           `    pipeline - ${report.spans[1].durationMs()}ms`,
+        ].join('\n'));
+      });
+    });
+
+    it('scripts', () => {
+      redis.defineCommand('tracing', {
+        numberOfKeys: 2,
+        lua: 'return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}',
+      });
+
+      redis.defineCommand('tracingDynamic', {
+        lua: 'return KEYS',
+      });
+
+      const context = tracer.startSpan('parent');
+
+      return Promise.all([
+        redis.traced(context, 'tracing', 'katun', 'baloon', 'indigo'),
+        redis.traced(context, 'tracingDynamic', 3, 'one', 'two', 'three'),
+      ])
+      .finally(() => {
+        context.finish();
+      })
+      .spread((tracing, tracingDynamic) => {
+        const report = tracer.report();
+
+        assert.deepEqual(tracing, ['katun', 'baloon', 'indigo']);
+        assert.deepEqual(tracingDynamic, ['one', 'two', 'three']);
+
+        assert.ifError(report.firstSpanWithTagValue('error', true));
+
+        assert.equal(report.spans.length, 3);
+        assert.equal(report.unfinishedSpans.length, 0);
+        assert.equal(printReport(report), [
+          'Spans:',
+          `    parent - ${report.spans[0].durationMs()}ms`,
+          `    tracing - ${report.spans[1].durationMs()}ms`,
+          `    tracingDynamic - ${report.spans[2].durationMs()}ms`,
+        ].join('\n'));
+      });
+    });
+
+    it('mixed pipeline, traced commands & scripts', () => {
+      redis.defineCommand('dynamic', { lua: 'return KEYS' });
+
+      const context = tracer.startSpan('parent');
+      const pipeline = redis.traced(context, 'pipeline');
+      const normalScript = redis.dynamic(1, 'woo');
+      const traced = redis.traced(context, 'dynamic', 3, 1, 2, 3);
+
+      pipeline.ping();
+      pipeline.dynamic(4, 1, 2, 3, 4);
+
+      return Promise.all([
+        pipeline.exec(),
+        normalScript,
+        traced,
+      ])
+      .spread((pipe, script, trace) => {
+        context.finish();
+
+        assert.deepEqual([
+          [null, 'PONG'],
+          [null, ['1', '2', '3', '4']],
+        ], pipe);
+
+        assert.deepEqual(['1', '2', '3'], trace);
+        assert.deepEqual(['woo'], script);
+
+        const report = tracer.report();
+
+        assert.equal(report.spans.length, 3);
+        assert.equal(report.unfinishedSpans.length, 0);
+
+        assert.ifError(report.firstSpanWithTagValue('error', true));
+
+        assert.equal(printReport(report), [
+          'Spans:',
+          `    parent - ${report.spans[0].durationMs()}ms`,
+          `    pipeline - ${report.spans[1].durationMs()}ms`,
+          `    dynamic - ${report.spans[2].durationMs()}ms`,
         ].join('\n'));
       });
     });

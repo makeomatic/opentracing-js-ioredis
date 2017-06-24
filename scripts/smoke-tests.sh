@@ -5,6 +5,7 @@ set -e
 IOREDIS_VERSION=$(cat node_modules/ioredis/package.json | node_modules/.bin/json version)
 
 # checkout ioredis source
+rm -rf ./ioredis
 git clone https://github.com/luin/ioredis.git
 cd ioredis
 git checkout v${IOREDIS_VERSION}

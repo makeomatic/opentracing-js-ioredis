@@ -30,27 +30,24 @@ const wrapPromise = (span, promise) => (
 
 /**
  * Restricted commands, we don't patch into them.
- * @type {Array}
+ * @type {Object}
  */
-const restrictedCommands = Object.create(null, [
-  'ping',
-  'flushall',
-  'flushdb',
-  'select',
-  'auth',
-  'info',
-  'quit',
-  'slaveof',
-  'config',
-  'sentinel',
-  'cluster',
-  'swapdb',
-  'monitor',
-  'pipeline',
-].reduce((map, command) => {
-  map[command] = { value: true };
-  return map;
-}, {}));
+const restrictedCommands = Object.setPrototypeOf({
+  ping: true,
+  flushall: true,
+  flushdb: true,
+  select: true,
+  auth: true,
+  info: true,
+  quit: true,
+  slaveof: true,
+  config: true,
+  sentinel: true,
+  cluster: true,
+  swapdb: true,
+  monitor: true,
+  pipeline: true,
+}, null);
 
 // monkey-patch method
 Redis.Command.prototype.initPromise = function initPromise() {

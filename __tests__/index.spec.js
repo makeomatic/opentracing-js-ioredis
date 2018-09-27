@@ -1,11 +1,13 @@
 /* eslint-disable promise/always-return */
 const Promise = require('bluebird');
 const Redis = require('ioredis');
-const MockTracer = require('opentracing/lib/mock_tracer').MockTracer;
+const { MockTracer } = require('opentracing/lib/mock_tracer');
 const assert = require('assert');
 const instrumentRedis = require('../');
 
 describe('instrumentRedis', () => {
+  Redis.Promise = require('bluebird');
+
   const connectOpts = {
     host: 'localhost',
     port: 6379,
@@ -33,6 +35,12 @@ describe('instrumentRedis', () => {
     let redis;
     let tracer;
 
+    async function getReport() {
+      // NOTE: this is async only due to results being returned before they
+      // are recorded by opentracing
+      return tracer.report();
+    }
+
     beforeEach(() => {
       redis = new Redis(connectOpts);
       tracer = new MockTracer();
@@ -49,52 +57,50 @@ describe('instrumentRedis', () => {
       });
     });
 
-    it('restricted operation', () => (
-      redis.traced(null, 'ping').then((response) => {
-        assert.equal(response, 'PONG');
-        assert.deepEqual(tracer.report().spans, []);
-      })
-    ));
+    it('restricted operation', async () => {
+      const response = await redis.traced(null, 'ping');
 
-    it('allowed operation', () => (
-      redis.traced(null, 'set', 'xxx', 10).then((response) => {
-        assert.equal(response, 'OK');
-
-        const report = tracer.report();
-
-        assert.ifError(report.firstSpanWithTagValue('error', true));
-
-        assert.equal(report.spans.length, 1);
-        assert.equal(report.unfinishedSpans.length, 0);
-        assert.equal(printReport(report), [
-          'Spans:',
-          `    set - ${report.spans[0].durationMs()}ms`,
-        ].join('\n'));
-      })
-    ));
-
-    it('parentContext operations', () => {
-      const context = tracer.startSpan('parent');
-      return redis
-        .traced(context, 'set', 'xxx', 'choo')
-        .then(() => {
-          context.finish();
-
-          const report = tracer.report();
-
-          assert.ifError(report.firstSpanWithTagValue('error', true));
-
-          assert.equal(report.spans.length, 2);
-          assert.equal(report.unfinishedSpans.length, 0);
-          assert.equal(printReport(report), [
-            'Spans:',
-            `    parent - ${report.spans[0].durationMs()}ms`,
-            `    set - ${report.spans[1].durationMs()}ms`,
-          ].join('\n'));
-        });
+      assert.equal(response, 'PONG');
+      assert.deepEqual((await getReport()).spans, []);
     });
 
-    it('pipeline & parent', () => {
+    it('allowed operation', async () => {
+      const response = await redis.traced(null, 'set', 'xxx', 10);
+
+      assert.equal(response, 'OK');
+
+      const report = await getReport();
+
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(report.spans.length, 1);
+      assert.equal(report.unfinishedSpans.length, 0);
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    set - ${report.spans[0].durationMs()}ms`,
+      ].join('\n'));
+    });
+
+    it('parentContext operations', async () => {
+      const context = tracer.startSpan('parent');
+      await redis.traced(context, 'set', 'xxx', 'choo');
+
+      context.finish();
+
+      const report = await getReport();
+
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(report.spans.length, 2);
+      assert.equal(report.unfinishedSpans.length, 0);
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    parent - ${report.spans[0].durationMs()}ms`,
+        `    set - ${report.spans[1].durationMs()}ms`,
+      ].join('\n'));
+    });
+
+    it('pipeline & parent', async () => {
       const context = tracer.startSpan('parent');
       const pipeline = redis.traced(context, 'pipeline');
 
@@ -102,30 +108,30 @@ describe('instrumentRedis', () => {
       pipeline.get('bonjurno');
       pipeline.ping();
 
-      return pipeline.exec().spread((set, get, ping) => {
-        assert.ifError(set[0]);
-        assert.ifError(get[0]);
-        assert.ifError(ping[0]);
+      const [set, get, ping] = await pipeline.exec();
 
-        assert.equal(set[1], 'OK');
-        assert.equal(get[1], 'yes!');
-        assert.equal(ping[1], 'PONG');
+      assert.ifError(set[0]);
+      assert.ifError(get[0]);
+      assert.ifError(ping[0]);
 
-        const report = tracer.report();
-        assert.equal(report.spans.length, 2);
-        assert.equal(report.unfinishedSpans.length, 1);
+      assert.equal(set[1], 'OK');
+      assert.equal(get[1], 'yes!');
+      assert.equal(ping[1], 'PONG');
 
-        assert.ifError(report.firstSpanWithTagValue('error', true));
+      const report = await getReport();
+      assert.equal(report.spans.length, 2);
+      assert.equal(report.unfinishedSpans.length, 1);
 
-        assert.equal(printReport(report), [
-          'Spans:',
-          `    parent - ${report.spans[0].durationMs()}ms`, // <--- unfinished, still printed
-          `    pipeline - ${report.spans[1].durationMs()}ms`,
-        ].join('\n'));
-      });
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    parent - ${report.spans[0].durationMs()}ms`, // <--- unfinished, still printed
+        `    pipeline - ${report.spans[1].durationMs()}ms`,
+      ].join('\n'));
     });
 
-    it('scripts', () => {
+    it('scripts', async () => {
       redis.defineCommand('tracing', {
         numberOfKeys: 2,
         lua: 'return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}',
@@ -137,33 +143,31 @@ describe('instrumentRedis', () => {
 
       const context = tracer.startSpan('parent');
 
-      return Promise.all([
+      const [tracing, tracingDynamic] = await Promise.all([
         redis.traced(context, 'tracing', 'katun', 'baloon', 'indigo'),
         redis.traced(context, 'tracingDynamic', 3, 'one', 'two', 'three'),
-      ])
-      .finally(() => {
-        context.finish();
-      })
-      .spread((tracing, tracingDynamic) => {
-        const report = tracer.report();
+      ]);
 
-        assert.deepEqual(tracing, ['katun', 'baloon', 'indigo']);
-        assert.deepEqual(tracingDynamic, ['one', 'two', 'three']);
+      context.finish();
 
-        assert.ifError(report.firstSpanWithTagValue('error', true));
+      const report = await getReport();
 
-        assert.equal(report.spans.length, 3);
-        assert.equal(report.unfinishedSpans.length, 0);
-        assert.equal(printReport(report), [
-          'Spans:',
-          `    parent - ${report.spans[0].durationMs()}ms`,
-          `    tracing - ${report.spans[1].durationMs()}ms`,
-          `    tracingDynamic - ${report.spans[2].durationMs()}ms`,
-        ].join('\n'));
-      });
+      assert.deepEqual(tracing, ['katun', 'baloon', 'indigo']);
+      assert.deepEqual(tracingDynamic, ['one', 'two', 'three']);
+
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(report.spans.length, 3);
+      assert.equal(report.unfinishedSpans.length, 0);
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    parent - ${report.spans[0].durationMs()}ms`,
+        `    tracing - ${report.spans[1].durationMs()}ms`,
+        `    tracingDynamic - ${report.spans[2].durationMs()}ms`,
+      ].join('\n'));
     });
 
-    it('mixed pipeline, traced commands & scripts', () => {
+    it('mixed pipeline, traced commands & scripts', async () => {
       redis.defineCommand('dynamic', { lua: 'return KEYS' });
 
       const context = tracer.startSpan('parent');
@@ -174,42 +178,45 @@ describe('instrumentRedis', () => {
       pipeline.ping();
       pipeline.dynamic(4, 1, 2, 3, 4);
 
-      return Promise.all([
+      const [pipe, script, trace] = await Promise.all([
         pipeline.exec(),
         normalScript,
         traced,
-      ])
-      .spread((pipe, script, trace) => {
-        context.finish();
+      ]);
 
-        assert.deepEqual([
-          [null, 'PONG'],
-          [null, ['1', '2', '3', '4']],
-        ], pipe);
+      context.finish();
 
-        assert.deepEqual(['1', '2', '3'], trace);
-        assert.deepEqual(['woo'], script);
+      assert.deepEqual([
+        [null, 'PONG'],
+        [null, ['1', '2', '3', '4']],
+      ], pipe);
 
-        const report = tracer.report();
+      assert.deepEqual(['1', '2', '3'], trace);
+      assert.deepEqual(['woo'], script);
 
-        assert.equal(report.spans.length, 3);
-        assert.equal(report.unfinishedSpans.length, 0);
+      const report = await getReport();
 
-        assert.ifError(report.firstSpanWithTagValue('error', true));
+      assert.equal(report.spans.length, 3);
+      assert.equal(report.unfinishedSpans.length, 0);
 
-        assert.equal(printReport(report), [
-          'Spans:',
-          `    parent - ${report.spans[0].durationMs()}ms`,
-          `    pipeline - ${report.spans[1].durationMs()}ms`,
-          `    dynamic - ${report.spans[2].durationMs()}ms`,
-        ].join('\n'));
-      });
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    parent - ${report.spans[0].durationMs()}ms`,
+        `    pipeline - ${report.spans[1].durationMs()}ms`,
+        `    dynamic - ${report.spans[2].durationMs()}ms`,
+      ].join('\n'));
     });
   });
 
   describe('instrument Redis.Cluster', () => {
     let redis;
     let tracer;
+
+    async function getReport() {
+      return tracer.report();
+    }
 
     beforeEach(() => {
       redis = new Redis.Cluster(clusterOpts);
@@ -234,52 +241,49 @@ describe('instrumentRedis', () => {
       });
     });
 
-    it('restricted operation', () => (
-      redis.traced(null, 'ping').then((response) => {
-        assert.equal(response, 'PONG');
-        assert.deepEqual(tracer.report().spans, []);
-      })
-    ));
+    it('restricted operation', async () => {
+      const response = await redis.traced(null, 'ping');
 
-    it('allowed operation', () => (
-      redis.traced(null, 'set', 'xxx', 10).then((response) => {
-        assert.equal(response, 'OK');
-
-        const report = tracer.report();
-
-        assert.ifError(report.firstSpanWithTagValue('error', true));
-
-        assert.equal(report.spans.length, 1);
-        assert.equal(report.unfinishedSpans.length, 0);
-        assert.equal(printReport(report), [
-          'Spans:',
-          `    set - ${report.spans[0].durationMs()}ms`,
-        ].join('\n'));
-      })
-    ));
-
-    it('parentContext operations', () => {
-      const context = tracer.startSpan('parent');
-      return redis
-        .traced(context, 'set', 'xxx', 'choo')
-        .then(() => {
-          context.finish();
-
-          const report = tracer.report();
-
-          assert.ifError(report.firstSpanWithTagValue('error', true));
-
-          assert.equal(report.spans.length, 2);
-          assert.equal(report.unfinishedSpans.length, 0);
-          assert.equal(printReport(report), [
-            'Spans:',
-            `    parent - ${report.spans[0].durationMs()}ms`,
-            `    set - ${report.spans[1].durationMs()}ms`,
-          ].join('\n'));
-        });
+      assert.equal(response, 'PONG');
+      assert.deepEqual((await getReport()).spans, []);
     });
 
-    it('pipeline & parent', () => {
+    it('allowed operation', async () => {
+      const response = await redis.traced(null, 'set', 'xxx', 10);
+      assert.equal(response, 'OK');
+
+      const report = await getReport();
+
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(report.spans.length, 1);
+      assert.equal(report.unfinishedSpans.length, 0);
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    set - ${report.spans[0].durationMs()}ms`,
+      ].join('\n'));
+    });
+
+    it('parentContext operations', async () => {
+      const context = tracer.startSpan('parent');
+      await redis.traced(context, 'set', 'xxx', 'choo');
+
+      context.finish();
+
+      const report = await getReport();
+
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(report.spans.length, 2);
+      assert.equal(report.unfinishedSpans.length, 0);
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    parent - ${report.spans[0].durationMs()}ms`,
+        `    set - ${report.spans[1].durationMs()}ms`,
+      ].join('\n'));
+    });
+
+    it('pipeline & parent', async () => {
       const context = tracer.startSpan('parent');
       const pipeline = redis.traced(context, 'pipeline');
 
@@ -287,30 +291,30 @@ describe('instrumentRedis', () => {
       pipeline.get('bonjurno');
       pipeline.ping();
 
-      return pipeline.exec().spread((set, get, ping) => {
-        assert.ifError(set[0]);
-        assert.ifError(get[0]);
-        assert.ifError(ping[0]);
+      const [set, get, ping] = await pipeline.exec();
 
-        assert.equal(set[1], 'OK');
-        assert.equal(get[1], 'yes!');
-        assert.equal(ping[1], 'PONG');
+      assert.ifError(set[0]);
+      assert.ifError(get[0]);
+      assert.ifError(ping[0]);
 
-        const report = tracer.report();
-        assert.equal(report.spans.length, 2);
-        assert.equal(report.unfinishedSpans.length, 1);
+      assert.equal(set[1], 'OK');
+      assert.equal(get[1], 'yes!');
+      assert.equal(ping[1], 'PONG');
 
-        assert.ifError(report.firstSpanWithTagValue('error', true));
+      const report = await getReport();
+      assert.equal(report.spans.length, 2);
+      assert.equal(report.unfinishedSpans.length, 1);
 
-        assert.equal(printReport(report), [
-          'Spans:',
-          `    parent - ${report.spans[0].durationMs()}ms`, // <--- unfinished, still printed
-          `    pipeline - ${report.spans[1].durationMs()}ms`,
-        ].join('\n'));
-      });
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    parent - ${report.spans[0].durationMs()}ms`, // <--- unfinished, still printed
+        `    pipeline - ${report.spans[1].durationMs()}ms`,
+      ].join('\n'));
     });
 
-    it('scripts', () => {
+    it('scripts', async () => {
       redis.defineCommand('tracing', {
         numberOfKeys: 2,
         lua: 'return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}',
@@ -322,33 +326,30 @@ describe('instrumentRedis', () => {
 
       const context = tracer.startSpan('parent');
 
-      return Promise.all([
+      const [tracing, tracingDynamic] = await Promise.all([
         redis.traced(context, 'tracing', '{1}katun', '{1}baloon', '{1}indigo'),
         redis.traced(context, 'tracingDynamic', 3, '{1}one', '{1}two', '{1}three'),
-      ])
-      .finally(() => {
-        context.finish();
-      })
-      .spread((tracing, tracingDynamic) => {
-        const report = tracer.report();
+      ]);
 
-        assert.deepEqual(tracing, ['{1}katun', '{1}baloon', '{1}indigo']);
-        assert.deepEqual(tracingDynamic, ['{1}one', '{1}two', '{1}three']);
+      context.finish();
+      const report = await getReport();
 
-        assert.ifError(report.firstSpanWithTagValue('error', true));
+      assert.deepEqual(tracing, ['{1}katun', '{1}baloon', '{1}indigo']);
+      assert.deepEqual(tracingDynamic, ['{1}one', '{1}two', '{1}three']);
 
-        assert.equal(report.spans.length, 3);
-        assert.equal(report.unfinishedSpans.length, 0);
-        assert.equal(printReport(report), [
-          'Spans:',
-          `    parent - ${report.spans[0].durationMs()}ms`,
-          `    tracing - ${report.spans[1].durationMs()}ms`,
-          `    tracingDynamic - ${report.spans[2].durationMs()}ms`,
-        ].join('\n'));
-      });
+      assert.ifError(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(report.spans.length, 3);
+      assert.equal(report.unfinishedSpans.length, 0);
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    parent - ${report.spans[0].durationMs()}ms`,
+        `    tracing - ${report.spans[1].durationMs()}ms`,
+        `    tracingDynamic - ${report.spans[2].durationMs()}ms`,
+      ].join('\n'));
     });
 
-    it('mixed pipeline, traced commands & scripts', () => {
+    it('mixed pipeline, traced commands & scripts', async () => {
       redis.defineCommand('dynamic', { lua: 'return KEYS' });
 
       const context = tracer.startSpan('parent');
@@ -359,36 +360,35 @@ describe('instrumentRedis', () => {
       pipeline.ping();
       pipeline.dynamic(4, 1, 2, 3, 4);
 
-      return Promise.all([
+      const [pipe, script, trace] = await Promise.all([
         pipeline.exec().reflect(),
         normalScript,
         traced.reflect(),
-      ])
-      .spread((pipe, script, trace) => {
-        context.finish();
+      ]);
 
-        assert.equal(pipe.reason().message, 'Sending custom commands in pipeline is not supported in Cluster mode.');
+      context.finish();
 
-        assert.deepEqual('CROSSSLOT Keys in request don\'t hash to the same slot', trace.reason().message);
-        assert.deepEqual(['woo'], script);
+      assert.equal(pipe.reason().message, 'Sending custom commands in pipeline is not supported in Cluster mode.');
 
-        const report = tracer.report();
+      assert.deepEqual('CROSSSLOT Keys in request don\'t hash to the same slot', trace.reason().message);
+      assert.deepEqual(['woo'], script);
 
-        assert.equal(report.spans.length, 4);
-        assert.equal(report.unfinishedSpans.length, 0);
+      const report = await getReport();
 
-        assert.ok(report.firstSpanWithTagValue('error', true));
+      assert.equal(report.spans.length, 4);
+      assert.equal(report.unfinishedSpans.length, 0);
 
-        assert.equal(printReport(report), [
-          'Spans:',
-          `    parent - ${report.spans[0].durationMs()}ms`,
-          `    pipeline - ${report.spans[1].durationMs()}ms`,
-          "        tag 'error':'true'",
-          `    dynamic - ${report.spans[2].durationMs()}ms`,
-          `    dynamic - ${report.spans[3].durationMs()}ms`,
-          "        tag 'error':'true'",
-        ].join('\n'));
-      });
+      assert.ok(report.firstSpanWithTagValue('error', true));
+
+      assert.equal(printReport(report), [
+        'Spans:',
+        `    parent - ${report.spans[0].durationMs()}ms`,
+        `    pipeline - ${report.spans[1].durationMs()}ms`,
+        "        tag 'error':'true'",
+        `    dynamic - ${report.spans[2].durationMs()}ms`,
+        `    dynamic - ${report.spans[3].durationMs()}ms`,
+        "        tag 'error':'true'",
+      ].join('\n'));
     });
   });
 });

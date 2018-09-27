@@ -2,7 +2,7 @@ const opentracing = require('opentracing');
 const assert = require('assert');
 const defaults = require('lodash.defaults');
 const Redis = require('ioredis');
-const Script = require('ioredis/lib/script');
+const Script = require('ioredis/built/script');
 
 // Hold original reference so that we an redefine it later
 const originalInitPromise = Redis.Command.prototype.initPromise;
@@ -12,20 +12,30 @@ const originalScriptExecute = Script.prototype.execute;
 let currentSpan = null;
 let traceStatements = false;
 
+const grabSpan = () => {
+  const span = currentSpan;
+  currentSpan = null;
+  return span;
+};
+
 /**
  * Wraps promise with span error and finish handlers
  * @param  {opentracing.Span} span - Opentracing Span instance.
  * @param  {Promise} promise - Promise instance.
  * @returns {Promise} - Wrapped Promise.
  */
-const wrapPromise = (span, promise) => (
-  promise.tapCatch((err) => {
-    span.setTag(opentracing.Tags.ERROR, true);
-    span.log({ event: 'error', 'error.object': err, message: err.message, stack: err.stack });
-  })
-  .finally(() => {
-    span.finish();
-  })
+const trackOperation = (span, promise) => (
+  promise
+    .catch((err) => {
+      span.setTag(opentracing.Tags.ERROR, true);
+      span.log({
+        event: 'error', 'error.object': err, message: err.message, stack: err.stack,
+      });
+    })
+    .then(() => {
+      span.finish();
+      return undefined;
+    })
 );
 
 /**
@@ -51,21 +61,13 @@ const restrictedCommands = Object.setPrototypeOf({
 
 // monkey-patch method
 Redis.Command.prototype.initPromise = function initPromise() {
-  if (restrictedCommands[this.name] === true || currentSpan === null) {
-    originalInitPromise.call(this);
+  const span = grabSpan();
+  originalInitPromise.call(this);
+
+  // don't do anything if its blacklisted or there is no initialized span
+  if (restrictedCommands[this.name] === true || span === null) {
     return;
   }
-
-  // grab span reference
-  const span = currentSpan;
-  currentSpan = null;
-
-  // invoke original method making sure .callback is undefined
-  // so that promise.nodeify is not invoked
-  const callback = this.callback;
-  this.callback = undefined;
-  originalInitPromise.call(this);
-  this.callback = callback;
 
   // add statement tracing - this is a huge performance hit,
   // so it's off by default
@@ -73,27 +75,22 @@ Redis.Command.prototype.initPromise = function initPromise() {
     span.setTag(opentracing.Tags.DB_STATEMENT, this.toWritable());
   }
 
-  // rewire this.promise reference to instrumented one
-  this.promise = wrapPromise(span, this.promise)
-    .asCallback(callback);
+  trackOperation(span, this.promise);
 };
 
 // monkey-patch execute
 Script.prototype.execute = function execute(container, args, options, callback) {
-  if (currentSpan === null) {
-    return originalScriptExecute.call(this, container, args, options, callback);
+  const span = grabSpan();
+  const result = originalScriptExecute
+    .call(this, container, args, options, callback);
+
+  if (span === null) {
+    return result;
   }
 
-  // grab reference now so that it's not overwritten by new Command in the original script
-  const span = currentSpan;
-  currentSpan = null;
+  trackOperation(span, result);
 
-  // do original execute
-  const result = originalScriptExecute.call(this, container, args, options);
-
-  // must be promise as this can't be called from pipeline
-  return wrapPromise(span, result)
-    .asCallback(callback);
+  return result;
 };
 
 /**
@@ -162,8 +159,8 @@ module.exports = function applyInstrumentation(tracer, redis, _opts) {
       // init pipeline
       const pipeline = redis[commandName](...args);
 
-      // rewire initialized promise on that pipeline
-      pipeline.promise = wrapPromise(span, pipeline.promise);
+      // track end of the promise chain
+      trackOperation(span, pipeline.promise);
 
       return pipeline;
     }

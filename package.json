@@ -1,6 +1,6 @@
 {
   "name": "opentracing-js-ioredis",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Opentracing instrumentation for ioredis",
   "main": "./index.js",
   "repository": "https://github.com/makeomatic/opentracing-js-ioredis.git",

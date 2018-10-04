@@ -30,8 +30,7 @@
     "json": "^9.0.6"
   },
   "peerDependencies": {
-    "bluebird": "3.x.x",
-    "ioredis": "4.x.x"
+    "bluebird": "3.x.x"
   },
   "dependencies": {
     "lodash.defaults": "^4.2.0",

@@ -1,8 +1,7 @@
 const opentracing = require('opentracing');
 const assert = require('assert');
 const defaults = require('lodash.defaults');
-const Redis = require('ioredis');
-const Script = require('ioredis/built/script');
+const { Redis, Script } = require('./ioredis');
 
 // Hold original reference so that we an redefine it later
 const originalInitPromise = Redis.Command.prototype.initPromise;

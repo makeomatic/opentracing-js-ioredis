@@ -16,7 +16,8 @@
     "test:smoke": "./scripts/smoke-tests.sh"
   },
   "files": [
-    "index.js"
+    "index.js",
+    "ioredis.js"
   ],
   "devDependencies": {
     "babel-eslint": "^10.0.0",

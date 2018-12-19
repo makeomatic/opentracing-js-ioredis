@@ -6,7 +6,7 @@ let Script;
 
 try {
   Redis = require('ioredis');
-  Script = require('ioredis/built/script');
+  Script = require('ioredis/built/script').default || require('ioredis/built/script');
 } catch (e) {
   Redis = require('@makeomatic/ioredis');
   Script = require('@makeomatic/ioredis/built/script');

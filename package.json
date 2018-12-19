@@ -20,13 +20,13 @@
     "ioredis.js"
   ],
   "devDependencies": {
-    "babel-eslint": "^10.0.0",
-    "bluebird": "^3.5.2",
-    "eslint": "5.6.0",
+    "babel-eslint": "^10.0.1",
+    "bluebird": "^3.5.3",
+    "eslint": "5.10.0",
     "eslint-config-makeomatic": "^3.0.0",
     "eslint-plugin-import": "^2.14.0",
     "eslint-plugin-promise": "^4.0.1",
-    "ioredis": "^4.0.0",
+    "ioredis": "^4.3.0",
     "jest": "^23.6.0",
     "json": "^9.0.6"
   },
